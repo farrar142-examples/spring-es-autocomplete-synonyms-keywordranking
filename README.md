@@ -101,3 +101,9 @@ data class Product (
 	val id: String? = null
 )
 ```
+4. ProductRepositor 정의
+```kotlin
+// src/main/kotlin/com/example/demo/repository/ProductRepository.kt
+interface ProductRepository : ElasticsearchRepository<Product, String> {
+}
+```
