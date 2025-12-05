@@ -1,0 +1,79 @@
+{
+  "index": {
+    "max_ngram_diff": 10
+  },
+  "analysis": {
+    "tokenizer": {
+      "nori_tokenizer_mixed": {
+        "type": "nori_tokenizer",
+        "decompound_mode": "mixed"
+      },
+      "ngram_tokenizer": {
+        "type": "ngram",
+        "min_gram": 1,
+        "max_gram": 10,
+        "token_chars": ["letter", "digit"]
+      },
+      "edge_ngram_tokenizer": {
+        "type": "edge_ngram",
+        "min_gram": 1,
+        "max_gram": 20,
+        "token_chars": ["letter", "digit"]
+      }
+    },
+    "filter": {
+      "ngram_filter": {
+        "type": "ngram",
+        "min_gram": 1,
+        "max_gram": 10
+      },
+      "edge_ngram_filter": {
+        "type": "edge_ngram",
+        "min_gram": 1,
+        "max_gram": 20
+      }
+    },
+    "analyzer": {
+      "korean_nori_analyzer": {
+        "type": "custom",
+        "tokenizer": "nori_tokenizer_mixed",
+        "filter": ["lowercase", "nori_part_of_speech"]
+      },
+      "ngram_analyzer": {
+        "type": "custom",
+        "tokenizer": "ngram_tokenizer",
+        "filter": ["lowercase"]
+      },
+      "edge_ngram_analyzer": {
+        "type": "custom",
+        "tokenizer": "edge_ngram_tokenizer",
+        "filter": ["lowercase"]
+      },
+      "autocomplete_analyzer": {
+        "type": "custom",
+        "tokenizer": "standard",
+        "filter": ["lowercase", "edge_ngram_filter"]
+      },
+      "autocomplete_search_analyzer": {
+        "type": "custom",
+        "tokenizer": "standard",
+        "filter": ["lowercase"]
+      },
+      "korean_autocomplete_analyzer": {
+        "type": "custom",
+        "tokenizer": "nori_tokenizer_mixed",
+        "filter": ["lowercase", "nori_part_of_speech", "edge_ngram_filter"]
+      },
+      "korean_search_analyzer": {
+        "type": "custom",
+        "tokenizer": "nori_tokenizer_mixed",
+        "filter": ["lowercase", "nori_part_of_speech"]
+      },
+      "korean_synonym_analyzer": {
+        "type": "custom",
+        "tokenizer": "nori_tokenizer_mixed",
+        "filter": ["lowercase", "nori_part_of_speech"]
+      }
+    }
+  }
+}
