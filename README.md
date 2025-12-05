@@ -22,3 +22,25 @@
     volumes:
       esdata:
      ```
+2. Spring Data Elasticsearch 설정
+```yml
+# src/main/resources/application.yml
+spring:
+  application:
+    name: demo
+
+  elasticsearch:
+    uris: localhost:9200
+logging:
+  level:
+    '[org.springframework.data.elasticsearch]': DEBUG
+    '[org.elasticsearch.client]': DEBUG
+```
+```kotlin
+// src/main/kotlin/com/example/demo/config/ElasticsearchConfig.kt
+@Configuration
+@EnableElasticsearchRepositories(basePackages = ["com.example.demo"])
+class ElasticsearchConfig {
+
+}
+```
