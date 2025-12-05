@@ -107,3 +107,125 @@ data class Product (
 interface ProductRepository : ElasticsearchRepository<Product, String> {
 }
 ```
+5. Autocomplete사용을 위한 CustomProductRepository 정의
+#### 왜 CustomProductRepository를 사용하는가?
+
+Spring Data Elasticsearch의 기본 `ElasticsearchRepository`는 Completion Suggester를 직접 지원하지 않습니다. 따라서 **커스텀 리포지토리**를 통해 Elasticsearch의 저수준 클라이언트에 접근하여 Suggest API를 직접 호출해야 합니다.
+
+#### Autocomplete 메서드의 동작 원리
+
+```
+사용자 입력 "유러"
+       ↓
+┌─────────────────────────────────────────────────────┐
+│ 1. ElasticsearchTemplate에서 ES 클라이언트 획득     │
+│    template.execute { it }                          │
+└─────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────┐
+│ 2. CompletionSuggester 생성                         │
+│    - field: "suggestion" (Completion 필드)          │
+│    - size: 반환할 최대 결과 수                      │
+│    - skipDuplicates: 중복 제거                      │
+└─────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────┐
+│ 3. FieldSuggester에 prefix와 completion 설정        │
+│    - prefix: 사용자가 입력한 검색어 ("유러")        │
+└─────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────┐
+│ 4. Suggester로 FieldSuggester를 이름과 함께 등록    │
+│    - "prod-suggest": suggester 식별자 (응답 조회용) │
+│    - 복수 suggester 등록 가능                       │
+└─────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────┐
+│ 5. SearchRequest 생성 및 실행                       │
+│    - index: "products"                              │
+│    - suggest: 위에서 만든 suggester                 │
+│    - size: 0 (문서 본문 검색 결과는 불필요)         │
+└─────────────────────────────────────────────────────┘
+       ↓
+┌─────────────────────────────────────────────────────┐
+│ 6. 응답에서 Product 객체 추출                       │
+│    suggest → "prod-suggest" → options → source      │
+└─────────────────────────────────────────────────────┘
+       ↓
+   List<Product> 반환
+```
+
+#### 각 컴포넌트의 역할
+
+| 컴포넌트 | 역할 |
+|----------|------|
+| `ElasticsearchTemplate` | Spring의 ES 추상화 레이어, 저수준 클라이언트 접근 제공 |
+| `CompletionSuggester` | Completion 필드에 대한 자동완성 쿼리 정의 |
+| `FieldSuggester` | prefix(검색어)와 completion suggester를 연결 |
+| `Suggester` | 여러 suggester를 이름으로 그룹화 ("prod-suggest") |
+| `SearchRequest` | ES에 보낼 최종 검색 요청 (suggest 포함) |
+
+#### 왜 `size(0)`을 설정하는가?
+
+```kotlin
+val searchRequest = SearchRequest.Builder()
+    .index("products")
+    .suggest(suggester)
+    .size(0)  // ← 이 설정
+    .build()
+```
+
+- **목적**: 일반 검색 결과(hits)는 필요 없고, **suggest 결과만 필요**
+- **성능 최적화**: 불필요한 문서 본문을 가져오지 않아 응답 속도 향상
+- **suggest 결과는 별도**: `response.suggest()`에서 가져옴
+
+```kotlin
+// src/main/kotlin/com/example/demo/repository/CustomProductRepository.kt
+interface CustomProductRepository {
+	fun autocomplete(prefix: String, size: Int = 10): List<Product>
+}
+```
+```kotlin
+// src/main/kotlin/com/example/demo/repository/CustomProductRepositoryImpl.kt
+
+class CustomProductRepositoryImpl(
+	private val elasticsearchOperations: ElasticsearchOperations
+) : CustomProductRepository {
+
+	override fun autocomplete(prefix: String, size: Long): List<Product> {
+		val template = elasticsearchOperations as ElasticsearchTemplate
+		val client = template.execute { it }
+
+		val completionSuggester = CompletionSuggester.Builder()
+			.field("suggestion")
+			.size(size.toInt())
+			.skipDuplicates(true)
+			.build()
+
+		val fieldSuggester = FieldSuggester.Builder()
+			.prefix(prefix)
+			.completion(completionSuggester)
+			.build()
+
+		val suggester = Suggester.Builder()
+			.suggesters("prod-suggest", fieldSuggester)
+			.build()
+
+		val searchRequest = SearchRequest.Builder()
+			.index("products")
+			.suggest(suggester)
+			.size(0)
+			.build()
+
+		val response = client.search(searchRequest, Product::class.java)
+
+		val suggestMap = response.suggest()
+		val suggestions = suggestMap["prod-suggest"]?:emptyList()
+		return suggestions.map{it.completion()?.options()}
+			.filterNotNull()
+			.flatMap{it}
+			.map{it.source()}
+			.filterNotNull()
+	}
+}
+```
