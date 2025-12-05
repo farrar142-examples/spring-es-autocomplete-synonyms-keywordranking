@@ -1,0 +1,16 @@
+services:
+  elasticsearch:
+    build: .
+    container_name: elasticsearch
+    image: elasticsearch:nori
+    ports:
+      - "9200:9200"
+      - "9300:9300"
+    environment:
+      - discovery.type=single-node
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+    volumes:
+      - esdata:/usr/share/elasticsearch/data
+volumes:
+    esdata:
