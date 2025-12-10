@@ -1,23 +1,23 @@
 package com.example.demo
 
-import org.springframework.data.elasticsearch.annotations.Document
-import org.springframework.data.elasticsearch.client.elc.ElasticsearchTemplate
-import org.springframework.data.elasticsearch.core.ElasticsearchOperations
-
-import co.elastic.clients.elasticsearch.core.SearchRequest
+import co.elastic.clients.elasticsearch._types.query_dsl.Query
 import co.elastic.clients.elasticsearch.core.search.CompletionSuggester
 import co.elastic.clients.elasticsearch.core.search.FieldSuggester
 import co.elastic.clients.elasticsearch.core.search.Suggester
+import org.springframework.data.elasticsearch.client.elc.NativeQuery
+import org.springframework.data.elasticsearch.core.ElasticsearchOperations
+import org.springframework.data.elasticsearch.core.suggest.response.CompletionSuggestion
 
 
 class CustomProductRepositoryImpl(
 	private val elasticsearchOperations: ElasticsearchOperations
 ) : CustomProductRepository {
 
+	/**
+	 * Autocomplete - NativeQuery와 Completion Suggester 사용
+	 * - @Document 어노테이션에서 인덱스 이름 자동 인식
+	 */
 	override fun autocomplete(prefix: String, size: Long): List<Product> {
-		val template = elasticsearchOperations as ElasticsearchTemplate
-		val client = template.execute { it }
-
 		val completionSuggester = CompletionSuggester.Builder()
 			.field("suggestion")
 			.size(size.toInt())
@@ -33,40 +33,47 @@ class CustomProductRepositoryImpl(
 			.suggesters("prod-suggest", fieldSuggester)
 			.build()
 
-		val searchRequest = SearchRequest.Builder()
-			.index("products")
-			.suggest(suggester)
-			.size(0)
+		val nativeQuery = NativeQuery.builder()
+			.withSuggester(suggester)
+			.withMaxResults(0)
 			.build()
 
-		val response = client.search(searchRequest, Product::class.java)
+		val searchHits = elasticsearchOperations.search(nativeQuery, Product::class.java)
 
-		val suggestMap = response.suggest()
-		val suggestions = suggestMap["prod-suggest"]?:emptyList()
-		return suggestions.map{it.completion()?.options()}
-			.filterNotNull()
-			.flatMap{it}
-			.map{it.source()}
-			.filterNotNull()
-	}
+		// Spring Data Elasticsearch의 Suggest 응답 파싱
+		val suggest = searchHits.suggest ?: return emptyList()
 
-	override fun search(query: String, size: Long): List<Product> {
-		val template = elasticsearchOperations as ElasticsearchTemplate
-		val client = template.execute { it }
-		val searchRequest = SearchRequest.Builder()
-			.index("products")
-			.query { q ->
-				q.multiMatch { m ->
-					m.query(query)
-						.fields("name^3", "description", "category^2")
+		return suggest.suggestions
+			.filterIsInstance<CompletionSuggestion<Product>>()
+			.flatMap { completionSuggestion ->
+				completionSuggestion.entries.flatMap { entry ->
+					entry.options.mapNotNull { option ->
+						option.searchHit?.content
+					}
 				}
 			}
-			.size(size.toInt())
+	}
+
+	/**
+	 * 일반 검색은 NativeQuery 사용
+	 * - @Document 어노테이션에서 인덱스 이름 자동 인식
+	 * - 타입 안전한 SearchHits<T> 응답
+	 */
+	override fun search(query: String, size: Long): List<Product> {
+		val multiMatchQuery = Query.Builder()
+			.multiMatch { m ->
+				m.query(query)
+					.fields("name^3", "description", "category^2", "synonyms")
+			}
 			.build()
 
-		val response = client.search(searchRequest, Product::class.java)
+		val nativeQuery = NativeQuery.builder()
+			.withQuery(multiMatchQuery)
+			.withMaxResults(size.toInt())
+			.build()
 
-		return response.hits().hits()
-			.mapNotNull { it.source() }
+		val searchHits = elasticsearchOperations.search(nativeQuery, Product::class.java)
+
+		return searchHits.searchHits.mapNotNull { it.content }
 	}
 }

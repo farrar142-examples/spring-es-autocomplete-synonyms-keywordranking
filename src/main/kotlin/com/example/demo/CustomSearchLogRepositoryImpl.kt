@@ -1,8 +1,11 @@
 package com.example.demo
 
-import co.elastic.clients.elasticsearch.core.SearchRequest
+import co.elastic.clients.elasticsearch._types.aggregations.Aggregation
+import co.elastic.clients.elasticsearch._types.aggregations.StringTermsBucket
+import co.elastic.clients.elasticsearch._types.query_dsl.Query
 import co.elastic.clients.json.JsonData
-import org.springframework.data.elasticsearch.client.elc.ElasticsearchTemplate
+import org.springframework.data.elasticsearch.client.elc.ElasticsearchAggregations
+import org.springframework.data.elasticsearch.client.elc.NativeQuery
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations
 
 class CustomSearchLogRepositoryImpl(
@@ -10,32 +13,36 @@ class CustomSearchLogRepositoryImpl(
 ) : CustomSearchLogRepository {
 
     override fun getPopularSearches(duration: String, size: Int): List<SearchRank> {
-        val template = elasticsearchOperations as ElasticsearchTemplate
-        val client = template.execute { it }
-
-        val searchRequest = SearchRequest.Builder()
-            .index("search_logs")
-            .size(0)
-            .query { q ->
-                q.range { r ->
-                    r.untyped { u ->
-                        u.field("timestamp")
-                            .gte(JsonData.of("now-$duration"))
-                    }
-                }
-            }
-            .aggregations("popular_queries") { agg ->
-                agg.terms { t ->
-                    t.field("query")
-                        .size(size)
+        val rangeQuery = Query.Builder()
+            .range { r ->
+                r.untyped { u ->
+                    u.field("timestamp")
+                        .gte(JsonData.of("now-$duration"))
                 }
             }
             .build()
 
-        val response = client.search(searchRequest, SearchLog::class.java)
-        val termsAgg = response.aggregations()["popular_queries"]?.sterms()
+        val termsAggregation = Aggregation.Builder()
+            .terms { t ->
+                t.field("query")
+                    .size(size)
+            }
+            .build()
 
-        return termsAgg?.buckets()?.array()?.map { bucket ->
+        val nativeQuery = NativeQuery.builder()
+            .withQuery(rangeQuery)
+            .withAggregation("popular_queries", termsAggregation)
+            .withMaxResults(0)
+            .build()
+
+        val searchHits = elasticsearchOperations.search(nativeQuery, SearchLog::class.java)
+
+        val aggregations = searchHits.aggregations as? ElasticsearchAggregations
+        val esAggregation = aggregations?.aggregations()
+            ?.find { it.aggregation().name == "popular_queries" }
+        val termsAgg = esAggregation?.aggregation()?.aggregate?.sterms()
+
+        return termsAgg?.buckets()?.array()?.map { bucket: StringTermsBucket ->
             SearchRank(
                 query = bucket.key().stringValue(),
                 count = bucket.docCount()
@@ -44,36 +51,39 @@ class CustomSearchLogRepositoryImpl(
     }
 
     override fun getPopularSearchesBetween(from: String, to: String, size: Int): List<SearchRank> {
-        val template = elasticsearchOperations as ElasticsearchTemplate
-        val client = template.execute { it }
-
-        val searchRequest = SearchRequest.Builder()
-            .index("search_logs")
-            .size(0)
-            .query { q ->
-                q.range { r ->
-                    r.untyped { u ->
-                        u.field("timestamp")
-                            .gte(JsonData.of("now-$from"))
-                            .lt(JsonData.of("now-$to"))
-                    }
-                }
-            }
-            .aggregations("popular_queries") { agg ->
-                agg.terms { t ->
-                    t.field("query")
-                        .size(size)
+        val rangeQuery = Query.Builder()
+            .range { r ->
+                r.untyped { u ->
+                    u.field("timestamp")
+                        .gte(JsonData.of("now-$from"))
+                        .lt(JsonData.of("now-$to"))
                 }
             }
             .build()
 
-        val response = client.search(searchRequest, SearchLog::class.java)
-        val termsAgg = response.aggregations()["popular_queries"]?.sterms()
+        val termsAggregation = Aggregation.Builder()
+            .terms { t ->
+                t.field("query")
+                    .size(size)
+            }
+            .build()
 
-        return termsAgg?.buckets()?.array()?.map { bucket ->
+        val nativeQuery = NativeQuery.builder()
+            .withQuery(rangeQuery)
+            .withAggregation("popular_queries", termsAggregation)
+            .withMaxResults(0)
+            .build()
+
+        val searchHits = elasticsearchOperations.search(nativeQuery, SearchLog::class.java)
+
+        val aggregations = searchHits.aggregations as? ElasticsearchAggregations
+        val esAggregation = aggregations?.aggregations()
+            ?.find { it.aggregation().name == "popular_queries" }
+        val termsAgg = esAggregation?.aggregation()?.aggregate?.sterms()
+
+        return termsAgg?.buckets()?.array()?.map { bucket: StringTermsBucket ->
             SearchRank(bucket.key().stringValue(), bucket.docCount())
         } ?: emptyList()
     }
-
 }
 
