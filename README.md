@@ -101,7 +101,7 @@ data class Product (
 	val id: String? = null
 )
 ```
-4. ProductRepositor 정의
+4. ProductRepository 정의
 ```kotlin
 // src/main/kotlin/com/example/demo/repository/ProductRepository.kt
 interface ProductRepository : ElasticsearchRepository<Product, String> {
@@ -228,4 +228,199 @@ class CustomProductRepositoryImpl(
 			.filterNotNull()
 	}
 }
+```
+5. 동의어 검색을 위한 Synonym Filter 설정
+
+#### 역인덱스(Inverted Index)란?
+
+Elasticsearch의 핵심 자료구조입니다. 일반적인 "문서 → 단어" 방식이 아닌 **"단어 → 문서"** 방식으로 저장합니다.
+
+**일반 인덱스 (Forward Index)**
+```
+문서1: "RTX 5080TI 그래픽카드"
+문서2: "삼성 모니터"
+문서3: "GPU 쿨러"
+```
+
+**역인덱스 (Inverted Index)**
+```
+┌────────────┬─────────────────┐
+│ 토큰       │ 문서 ID         │
+├────────────┼─────────────────┤
+│ rtx        │ [문서1]         │
+│ 5080ti     │ [문서1]         │
+│ 그래픽카드 │ [문서1]         │
+│ 삼성       │ [문서2]         │
+│ 모니터     │ [문서2]         │
+│ gpu        │ [문서3]         │
+│ 쿨러       │ [문서3]         │
+└────────────┴─────────────────┘
+```
+
+**검색 과정:**
+1. 사용자가 "그래픽카드" 검색
+2. 역인덱스에서 "그래픽카드" 토큰 조회
+3. 해당 토큰이 있는 문서 ID [문서1] 반환
+4. 문서1의 내용 "RTX 5080TI 그래픽카드" 반환
+
+→ 전체 문서를 스캔하지 않고 **O(1)** 에 가까운 속도로 검색 가능
+
+#### 동의어 검색의 원리
+
+동의어 검색은 **검색 시점에 검색어를 확장**하여 역인덱스에서 여러 토큰을 조회하는 방식입니다.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ 역인덱스 (인덱싱 완료 상태)                             │
+├────────────┬────────────────────────────────────────────┤
+│ 토큰       │ 문서 ID                                    │
+├────────────┼────────────────────────────────────────────┤
+│ rtx        │ [문서1]                                    │
+│ 5080ti     │ [문서1]                                    │
+│ 그래픽카드 │ [문서1]  ← "GPU" 검색 시 여기서 매칭!     │
+│ 삼성       │ [문서2]                                    │
+│ 모니터     │ [문서2]  ← "디스플레이" 검색 시 여기서 매칭!│
+│ gpu        │ [문서3]                                    │
+│ 쿨러       │ [문서3]                                    │
+└────────────┴────────────────────────────────────────────┘
+
+사용자 입력: "GPU"
+     ↓
+synonym_graph_filter 적용
+     ↓
+확장된 검색어: ["gpu", "그래픽카드", "graphics", "card", "지포스", "라데온"]
+     ↓
+역인덱스에서 각 토큰 조회:
+  - "gpu" → [문서3] ✅
+  - "그래픽카드" → [문서1] ✅
+  - "graphics" → []
+  - "card" → []
+  - "지포스" → []
+  - "라데온" → []
+     ↓
+결과: [문서1, 문서3] 반환
+```
+
+#### 인덱싱 시 확장 vs 검색 시 확장
+
+| 방식 | 장점 | 단점 |
+|------|------|------|
+| **인덱싱 시 확장** | 검색 속도 빠름 | 동의어 변경 시 Reindex 필요, 인덱스 크기 증가 |
+| **검색 시 확장** (현재 방식) | 동의어 변경 용이, 인덱스 크기 작음 | 검색 시 약간의 오버헤드 |
+
+현재 구현은 **검색 시 확장** 방식을 사용하여 동의어 관리가 용이합니다.
+
+#### `analyzer` vs `searchAnalyzer`의 차이
+
+Elasticsearch에서는 **인덱싱 시점**과 **검색 시점**에 서로 다른 분석기를 적용할 수 있습니다.
+
+| 항목 | `analyzer` | `searchAnalyzer` |
+|------|------------|------------------|
+| **적용 시점** | 문서 저장(인덱싱) 시 | 검색 쿼리 실행 시 |
+| **역할** | 문서를 토큰화하여 역인덱스 생성 | 검색어를 토큰화하여 역인덱스와 매칭 |
+| **변경 시 Reindex** | ✅ 필요 | ❌ 불필요 |
+
+```kotlin
+@Field(
+    type = FieldType.Text,
+    analyzer = "korean_index_analyzer",        // 인덱싱 시 사용
+    searchAnalyzer = "korean_search_synonym_analyzer"  // 검색 시 사용
+)
+val name: String
+```
+
+#### 왜 분리하는가?
+
+**Synonym Filter의 특성** 때문입니다:
+
+1. **`synonym` 타입**: Nori 분석기와 함께 사용 시 position increment 충돌 발생
+2. **`synonym_graph` 타입**: **검색 시에만 사용 가능** (인덱싱 시 사용 불가)
+
+따라서 동의어 검색을 위해서는:
+- **인덱싱**: `synonym_graph_filter` 없이 기본 형태소 분석만 수행
+- **검색**: `synonym_graph_filter`를 포함하여 동의어 확장
+
+#### Synonym Graph Filter의 동작 원리
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ settings.json에 동의어 정의                              │
+│ "GPU, 그래픽카드, graphics card, 지포스, 라데온"         │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│ 인덱싱 시 (korean_index_analyzer)                       │
+│                                                         │
+│ "RTX 5080TI 그래픽카드"                                 │
+│     ↓ nori_tokenizer                                    │
+│ ["rtx", "5080ti", "그래픽카드"]                         │
+│     ↓ 역인덱스에 저장                                   │
+│                                                         │
+│ ※ synonym 확장 없음 - 원본 토큰만 저장                  │
+└─────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────┐
+│ 검색 시 (korean_search_synonym_analyzer)                │
+│                                                         │
+│ 사용자 입력: "GPU"                                      │
+│     ↓ nori_tokenizer                                    │
+│ ["gpu"]                                                 │
+│     ↓ synonym_graph_filter (동의어 확장!)               │
+│ ["gpu", "그래픽카드", "graphics", "card", "지포스", "라데온"] │
+│     ↓ 역인덱스에서 검색                                 │
+│ "그래픽카드" 매칭! → "RTX 5080TI 그래픽카드" 반환 ✅    │
+└─────────────────────────────────────────────────────────┘
+```
+
+#### 동의어 정의 방식
+
+```json
+// settings.json
+"synonym_graph_filter": {
+  "type": "synonym_graph",
+  "synonyms": [
+    "GPU, 그래픽카드, graphics card, 지포스, 라데온",
+    "CPU, 프로세서, processor",
+    "모니터, 디스플레이, display, 화면"
+  ]
+}
+```
+
+- **쉼표(,)로 구분**: 양방향 동의어 (GPU ↔ 그래픽카드)
+- **화살표(=>)**: 단방향 동의어 (`GPU => 그래픽카드`는 GPU 검색 시만 그래픽카드 매칭)
+
+#### 동의어 업데이트 시 Reindex 필요 여부
+
+| 변경 항목 | Reindex 필요 |
+|-----------|--------------|
+| `synonym_graph_filter` 동의어 추가/삭제 | ❌ 불필요 (검색 시에만 적용) |
+| `analyzer` (인덱싱 분석기) 변경 | ✅ 필요 |
+| 필드 타입 변경 | ✅ 필요 |
+
+**단, 동의어 변경을 적용하려면 인덱스 close/open 또는 재생성 필요:**
+```bash
+curl -X POST "localhost:9200/products/_close"
+curl -X POST "localhost:9200/products/_open"
+```
+
+```kotlin
+// src/main/kotlin/com/example/demo/document/Product.kt
+@Document(indexName = "products")
+@Setting(
+	settingPath = "elasticsearch/settings.json"
+)
+data class Product (
+	@Field(type= FieldType.Text, analyzer = "korean_index_analyzer", searchAnalyzer = "korean_search_synonym_analyzer")
+	val name: String,
+	@Field(type= FieldType.Text, analyzer = "korean_index_analyzer", searchAnalyzer = "korean_search_synonym_analyzer")
+	val description:String,
+	@Field(type= FieldType.Text, analyzer = "korean_index_analyzer", searchAnalyzer = "korean_search_synonym_analyzer")
+	val category:String,
+	@CompletionField(
+		searchAnalyzer = "autocomplete_analyzer"
+	)
+	val suggestion: Completion,
+	@Id
+	val id: String? = null
+)
 ```

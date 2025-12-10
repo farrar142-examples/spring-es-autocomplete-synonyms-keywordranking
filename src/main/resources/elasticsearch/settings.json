@@ -31,6 +31,18 @@
         "type": "edge_ngram",
         "min_gram": 1,
         "max_gram": 20
+      },
+      "synonym_graph_filter": {
+        "type": "synonym_graph",
+        "synonyms": [
+          "GPU, 그래픽카드, graphics card, 지포스, 라데온",
+          "CPU, 프로세서, processor",
+          "RAM, 메모리, 램, memory",
+          "SSD, 솔리드스테이트드라이브",
+          "HDD, 하드디스크",
+          "모니터, 디스플레이, display, 화면",
+          "한식, korean food"
+        ]
       }
     },
     "analyzer": {
@@ -69,10 +81,15 @@
         "tokenizer": "nori_tokenizer_mixed",
         "filter": ["lowercase", "nori_part_of_speech"]
       },
-      "korean_synonym_analyzer": {
+      "korean_index_analyzer": {
         "type": "custom",
         "tokenizer": "nori_tokenizer_mixed",
         "filter": ["lowercase", "nori_part_of_speech"]
+      },
+      "korean_search_synonym_analyzer": {
+        "type": "custom",
+        "tokenizer": "nori_tokenizer_mixed",
+        "filter": ["lowercase", "nori_part_of_speech", "synonym_graph_filter"]
       }
     }
   }

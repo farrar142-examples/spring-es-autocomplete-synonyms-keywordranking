@@ -13,11 +13,11 @@ import org.springframework.data.elasticsearch.core.suggest.Completion
 	settingPath = "elasticsearch/settings.json"
 )
 data class Product (
-	@Field(type= FieldType.Text)
+	@Field(type= FieldType.Text, analyzer = "korean_index_analyzer", searchAnalyzer = "korean_search_synonym_analyzer")
 	val name: String,
-	@Field(type= FieldType.Text)
+	@Field(type= FieldType.Text, analyzer = "korean_index_analyzer", searchAnalyzer = "korean_search_synonym_analyzer")
 	val description:String,
-	@Field(type= FieldType.Text)
+	@Field(type= FieldType.Text, analyzer = "korean_index_analyzer", searchAnalyzer = "korean_search_synonym_analyzer")
 	val category:String,
 	@CompletionField(
 		searchAnalyzer = "autocomplete_analyzer"
