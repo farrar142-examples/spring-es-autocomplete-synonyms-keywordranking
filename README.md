@@ -815,3 +815,41 @@ Elasticsearch Java Client에서 aggregation 타입에 따라 다른 메서드를
 | `dterms()` | Double Terms | 실수 필드 집계 |
 | `dateHistogram()` | Date Histogram | 날짜 히스토그램 |
 | `histogram()` | Histogram | 숫자 히스토그램 |
+
+9. 성능 고려사항
+
+#### 오래된 로그 자동 삭제 (ILM)
+
+검색 로그가 무한히 쌓이지 않도록 **Index Lifecycle Management** 설정:
+
+```json
+PUT _ilm/policy/search_logs_policy
+{
+  "policy": {
+    "phases": {
+      "hot": {
+        "actions": {
+          "rollover": {
+            "max_age": "1d",
+            "max_size": "5gb"
+          }
+        }
+      },
+      "delete": {
+        "min_age": "7d",
+        "actions": {
+          "delete": {}
+        }
+      }
+    }
+  }
+}
+```
+
+#### 성능 최적화 팁
+
+| 항목 | 해결 방법 |
+|------|-----------|
+| **로그 저장 지연** | 비동기 저장 (`@Async`) 또는 Bulk API 사용 |
+| **인덱스 크기 증가** | ILM으로 자동 삭제, 일별 인덱스 분리 |
+
