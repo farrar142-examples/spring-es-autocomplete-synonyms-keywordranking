@@ -540,3 +540,75 @@ data class Product (
 			.mapNotNull { it.source() }
 	}
 ```
+
+7. SearchLog Document 정의
+
+#### 구조 설계
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ 검색 요청 발생                                                  │
+│                                                                 │
+│ 1. 검색 실행 (products 인덱스)                                  │
+│ 2. 검색 로그 저장 (search_logs 인덱스)                          │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ search_logs 인덱스                                              │
+│                                                                 │
+│ { "query": "그래픽카드", "timestamp": "2025-12-10T14:35:00Z" }  │
+│ { "query": "모니터", "timestamp": "2025-12-10T14:35:01Z" }      │
+│ { "query": "그래픽카드", "timestamp": "2025-12-10T14:35:02Z" }  │
+│ ...                                                             │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ Aggregation으로 기간별 랭킹 조회                                │
+│                                                                 │
+│ - 5분 랭킹: now-5m ~ now                                        │
+│ - 10분 랭킹: now-10m ~ now                                      │
+│ - 1시간 랭킹: now-1h ~ now                                      │
+│ - 1일 랭킹: now-1d ~ now                                        │
+│ - 1주 랭킹: now-1w ~ now                                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### 필드 설계
+
+| 필드 | 타입 | 설명 |
+|------|------|------|
+| `query` | Keyword | 검색어 (집계용 - 분석되지 않은 원본 필요) |
+| `timestamp` | Date | 검색 시간 (범위 쿼리용) |
+| `userId` | Keyword | 사용자 ID (선택, 사용자별 분석용) |
+| `resultCount` | Long | 검색 결과 수 (선택) |
+
+#### 왜 `query`는 Keyword 타입인가?
+
+- **Text 타입**: 분석기에 의해 토큰화됨 → "그래픽카드" → ["그래픽", "카드"]
+- **Keyword 타입**: 원본 그대로 저장 → "그래픽카드"
+
+집계(Aggregation)에서는 **원본 검색어 그대로** 카운트해야 하므로 Keyword 타입을 사용합니다.
+
+```kotlin
+// src/main/kotlin/com/example/demo/SearchLog.kt
+@Document(indexName = "search_logs")
+data class SearchLog(
+    @Field(type = FieldType.Keyword)
+    val query: String,
+
+    @Field(type = FieldType.Date)
+    val timestamp: Instant,
+
+    @Field(type = FieldType.Keyword)
+    val userId: String? = null,
+
+    @Field(type = FieldType.Long)
+    val resultCount: Long = 0,
+
+    @Id
+    val id: String? = null
+)
+```
+
