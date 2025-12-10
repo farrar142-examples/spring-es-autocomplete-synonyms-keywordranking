@@ -612,3 +612,206 @@ data class SearchLog(
 )
 ```
 
+8. SearchLogRepository 정의
+
+Aggregation을 사용한 기간별 인기 검색어 조회 구현입니다.
+
+#### Aggregation이란?
+
+Elasticsearch의 집계 기능으로, SQL의 `GROUP BY`와 유사합니다.
+
+```
+SQL:     SELECT query, COUNT(*) FROM search_logs GROUP BY query ORDER BY COUNT(*) DESC
+ES:      terms aggregation on "query" field
+```
+
+```kotlin
+// src/main/kotlin/com/example/demo/SearchLogRepository.kt
+interface SearchLogRepository : ElasticsearchRepository<SearchLog, String>, CustomSearchLogRepository
+```
+```kotlin
+// src/main/kotlin/com/example/demo/CustomSearchLogRepository.kt
+interface CustomSearchLogRepository {
+    fun getPopularSearches(duration: String, size: Int): List<SearchRank>
+    fun getPopularSearchesBetween(from: String, to: String, size: Int): List<SearchRank>
+}   
+```
+```kotlin
+// src/main/kotlin/com/example/demo/CustomSearchLogRepositoryImpl.kt
+class CustomSearchLogRepositoryImpl(
+    private val elasticsearchOperations: ElasticsearchOperations
+) : CustomSearchLogRepository {
+
+
+	override fun getPopularSearches(duration: String, size: Int): List<SearchRank> {
+		val template = elasticsearchOperations as ElasticsearchTemplate
+		val client = template.execute { it }
+
+		val searchRequest = SearchRequest.Builder()
+			.index("search_logs")
+			.size(0)
+			.query { q ->
+				q.range { r ->
+					r.untyped { u ->
+						u.field("timestamp")
+							.gte(JsonData.of("now-$duration"))
+					}
+				}
+			}
+			.aggregations("popular_queries") { agg ->
+				agg.terms { t ->
+					t.field("query")
+						.size(size)
+				}
+			}
+			.build()
+
+		val response = client.search(searchRequest, SearchLog::class.java)
+		val termsAgg = response.aggregations()["popular_queries"]?.sterms()
+
+		return termsAgg?.buckets()?.array()?.map { bucket ->
+			SearchRank(
+				query = bucket.key().stringValue(),
+				count = bucket.docCount()
+			)
+		} ?: emptyList()
+	}
+
+	override fun getPopularSearchesBetween(from: String, to: String, size: Int): List<SearchRank> {
+		val template = elasticsearchOperations as ElasticsearchTemplate
+		val client = template.execute { it }
+
+		val searchRequest = SearchRequest.Builder()
+			.index("search_logs")
+			.size(0)
+			.query { q ->
+				q.range { r ->
+					r.untyped { u ->
+						u.field("timestamp")
+							.gte(JsonData.of("now-$from"))
+							.lt(JsonData.of("now-$to"))
+					}
+				}
+			}
+			.aggregations("popular_queries") { agg ->
+				agg.terms { t ->
+					t.field("query")
+						.size(size)
+				}
+			}
+			.build()
+
+		val response = client.search(searchRequest, SearchLog::class.java)
+		val termsAgg = response.aggregations()["popular_queries"]?.sterms()
+
+		return termsAgg?.buckets()?.array()?.map { bucket ->
+			SearchRank(bucket.key().stringValue(), bucket.docCount())
+		} ?: emptyList()
+	}
+
+}
+```
+
+#### 쿼리 구조 설명
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ SearchRequest                                                   │
+├─────────────────────────────────────────────────────────────────┤
+│ index: "search_logs"                                            │
+│ size: 0  ← 문서 본문 불필요, 집계 결과만 필요                   │
+│                                                                 │
+│ query:                                                          │
+│   range:                                                        │
+│     timestamp >= "now-1h"  ← 최근 1시간 내 로그만 필터          │
+│                                                                 │
+│ aggregations:                                                   │
+│   "popular_queries":                                            │
+│     terms:                                                      │
+│       field: "query"  ← 검색어별로 그룹화                       │
+│       size: 10        ← 상위 10개만                             │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ 응답 (Aggregation 결과)                                         │
+├─────────────────────────────────────────────────────────────────┤
+│ buckets:                                                        │
+│   - key: "그래픽카드", doc_count: 150                           │
+│   - key: "모니터", doc_count: 120                               │
+│   - key: "키보드", doc_count: 80                                │
+│   ...                                                           │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+#### Aggregation 응답 구조
+
+일반 검색과 Aggregation의 응답 구조는 다릅니다.
+
+**일반 검색 응답:**
+```json
+{
+  "hits": {
+    "total": { "value": 100 },
+    "hits": [
+      { "_source": { "query": "그래픽카드", ... } },
+      { "_source": { "query": "모니터", ... } }
+    ]
+  }
+}
+```
+
+**Aggregation 응답:**
+```json
+{
+  "hits": { "total": { "value": 100 }, "hits": [] },
+  "aggregations": {
+    "popular_queries": {
+      "buckets": [
+        { "key": "그래픽카드", "doc_count": 150 },
+        { "key": "모니터", "doc_count": 120 },
+        { "key": "키보드", "doc_count": 80 }
+      ]
+    }
+  }
+}
+```
+
+#### `aggregations`와 `buckets`란?
+
+| 용어 | 설명 |
+|------|------|
+| `aggregations` | 집계 결과를 담는 최상위 필드. 여러 개의 집계를 이름으로 구분 |
+| `popular_queries` | 우리가 지정한 집계 이름 (`.aggregations("popular_queries")`) |
+| `buckets` | 그룹화된 결과 배열. SQL의 `GROUP BY` 결과 행들과 유사 |
+| `key` | 그룹화 기준 값 (검색어) |
+| `doc_count` | 해당 그룹에 속한 문서 수 (검색 횟수) |
+
+#### 코드에서 Aggregation 결과 추출
+
+```kotlin
+val response = client.search(searchRequest, SearchLog::class.java)
+
+// 1. aggregations에서 "popular_queries" 집계 결과 가져오기
+val termsAgg = response.aggregations()["popular_queries"]?.sterms()
+
+// 2. buckets 배열에서 각 bucket의 key와 doc_count 추출
+return termsAgg?.buckets()?.array()?.map { bucket ->
+    SearchRank(
+        query = bucket.key().stringValue(),  // "그래픽카드"
+        count = bucket.docCount()            // 150
+    )
+} ?: emptyList()
+```
+
+#### 왜 `sterms()`를 사용하는가?
+
+Elasticsearch Java Client에서 aggregation 타입에 따라 다른 메서드를 사용합니다:
+
+| 메서드 | Aggregation 타입 | 용도 |
+|--------|-----------------|------|
+| `sterms()` | String Terms | 문자열 필드 집계 (Keyword) |
+| `lterms()` | Long Terms | 숫자 필드 집계 |
+| `dterms()` | Double Terms | 실수 필드 집계 |
+| `dateHistogram()` | Date Histogram | 날짜 히스토그램 |
+| `histogram()` | Histogram | 숫자 히스토그램 |
