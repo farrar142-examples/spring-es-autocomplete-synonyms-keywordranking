@@ -1,5 +1,6 @@
 package com.example.demo
 
+import org.springframework.data.elasticsearch.annotations.Document
 import org.springframework.data.elasticsearch.client.elc.ElasticsearchTemplate
 import org.springframework.data.elasticsearch.core.ElasticsearchOperations
 
@@ -47,5 +48,25 @@ class CustomProductRepositoryImpl(
 			.flatMap{it}
 			.map{it.source()}
 			.filterNotNull()
+	}
+
+	override fun search(query: String, size: Long): List<Product> {
+		val template = elasticsearchOperations as ElasticsearchTemplate
+		val client = template.execute { it }
+		val searchRequest = SearchRequest.Builder()
+			.index("products")
+			.query { q ->
+				q.multiMatch { m ->
+					m.query(query)
+						.fields("name^3", "description", "category^2")
+				}
+			}
+			.size(size.toInt())
+			.build()
+
+		val response = client.search(searchRequest, Product::class.java)
+
+		return response.hits().hits()
+			.mapNotNull { it.source() }
 	}
 }

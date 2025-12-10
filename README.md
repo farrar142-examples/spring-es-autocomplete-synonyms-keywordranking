@@ -424,3 +424,119 @@ data class Product (
 	val id: String? = null
 )
 ```
+6. 동의어 검색을 위한 쿼리 작성
+
+#### Multi-Match Query란?
+
+`multi_match`는 **여러 필드에 대해 동시에 검색**을 수행하는 쿼리입니다. 각 필드에 설정된 `searchAnalyzer`가 자동으로 적용되어 동의어 확장이 이루어집니다.
+
+```
+사용자 입력: "GPU"
+     ↓
+┌─────────────────────────────────────────────────────────┐
+│ multi_match 쿼리 실행                                   │
+│                                                         │
+│ 검색 대상 필드:                                         │
+│   - name (searchAnalyzer: korean_search_synonym_analyzer)│
+│   - description (searchAnalyzer: korean_search_synonym_analyzer)│
+│   - category (searchAnalyzer: korean_search_synonym_analyzer)│
+│                                                         │
+│ 각 필드에서 "GPU" → ["gpu", "그래픽카드", ...] 확장     │
+└─────────────────────────────────────────────────────────┘
+     ↓
+┌─────────────────────────────────────────────────────────┐
+│ 역인덱스에서 검색                                       │
+│                                                         │
+│ name 필드: "그래픽카드" 매칭 → score × 3 (boost)       │
+│ description 필드: 매칭 없음                             │
+│ category 필드: "컴퓨터 부품" 매칭 없음                  │
+└─────────────────────────────────────────────────────────┘
+     ↓
+   결과 반환 (score 기준 정렬)
+```
+
+#### 필드별 가중치 (Boost)
+
+`^` 기호를 사용하여 필드별 **가중치(boost)**를 설정합니다. 숫자가 클수록 해당 필드에서 매칭될 때 점수가 높아집니다.
+
+```kotlin
+.fields("name^3", "description", "category^2")
+```
+
+| 필드 | 표현 | 가중치 | 의미 |
+|------|------|--------|------|
+| name | `name^3` | 3배 | 상품명 매칭을 가장 중요하게 |
+| category | `category^2` | 2배 | 카테고리 매칭도 중요 |
+| description | `description` | 1배 (기본) | 설명은 기본 가중치 |
+
+#### 가중치가 점수에 미치는 영향
+
+```
+검색어: "모니터"
+
+문서1: { name: "삼성 모니터", description: "고해상도", category: "전자제품" }
+문서2: { name: "키보드", description: "모니터 받침대 포함", category: "모니터 악세서리" }
+
+점수 계산:
+┌─────────┬────────────────┬────────────────┬─────────────────┬───────────┐
+│ 문서    │ name 매칭      │ description    │ category 매칭   │ 총 점수   │
+│         │ (×3)           │ (×1)           │ (×2)            │           │
+├─────────┼──��─────────────┼────────────────┼─────────────────┼───────────┤
+│ 문서1   │ ✅ 1.0 × 3 = 3 │ ❌ 0           │ ❌ 0            │ 3.0       │
+│ 문서2   │ ❌ 0           │ ✅ 1.0 × 1 = 1 │ ✅ 1.0 × 2 = 2  │ 3.0       │
+└���────────┴────────────────┴────────────────┴─────────────────┴──���────────┘
+
+→ 두 문서 점수가 같지만, name 매칭이 더 "정확한" 결과로 판단 가능
+→ 실제로는 TF-IDF 등 추가 요소가 점수에 반영됨
+```
+
+#### Multi-Match의 타입
+
+```kotlin
+.fields("name^3", "description", "category^2")
+.type(TextQueryType.BestFields)  // 기본값
+```
+
+| 타입 | 설명 | 사용 시점 |
+|------|------|-----------|
+| `best_fields` | 가장 높은 점수의 필드만 사용 (기본값) | 하나의 필드에서 완전히 매칭되길 원할 때 |
+| `most_fields` | 모든 필드의 점수를 합산 | 여러 필드에 분산된 정보를 합칠 때 |
+| `cross_fields` | 필드를 하나로 합쳐서 검색 | 이름이 first_name, last_name으로 분리된 경우 |
+| `phrase` | 구문(phrase) 검색 | 단어 순서가 중요할 때 |
+
+#### 왜 Multi-Match를 사용하는가?
+
+| 방식 | 코드 | 단점 |
+|------|------|------|
+| 개별 match 쿼리 | `bool { should { match(name) } should { match(desc) } }` | 코드 복잡, 중복 |
+| **multi_match** | `multiMatch { fields("name", "desc") }` | ✅ 간결, 가중치 설정 용이 |
+
+```kotlin
+// src/main/kotlin/com/example/demo/repository/CustomProductRepository.kt
+
+    fun search(query:String, size:Long): List<Product>
+
+```
+```kotlin
+// src/main/kotlin/com/example/demo/repository/CustomProductRepositoryImpl.kt
+
+	override fun search(query: String, size: Long): List<Product> {
+		val template = elasticsearchOperations as ElasticsearchTemplate
+		val client = template.execute { it }
+		val searchRequest = SearchRequest.Builder()
+			.index("products")
+			.query { q ->
+				q.multiMatch { m ->
+					m.query(query)
+						.fields("name^3", "description", "category^2")
+				}
+			}
+			.size(size.toInt())
+			.build()
+
+		val response = client.search(searchRequest, Product::class.java)
+
+		return response.hits().hits()
+			.mapNotNull { it.source() }
+	}
+```
